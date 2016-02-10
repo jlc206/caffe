@@ -417,6 +417,7 @@ void P2PSync<Dtype>::run(const vector<int>& gpus) {
   }
 
   LOG(INFO)<< "Starting Optimization";
+  LOG(INFO)<< "THIS IS A TEST";
 
   for (int i = 1; i < syncs.size(); ++i) {
     syncs[i]->StartInternalThread();
