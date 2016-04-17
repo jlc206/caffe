@@ -1,6 +1,9 @@
 #ifndef CPU_ONLY
 #include <cuda_runtime.h>
 #endif
+
+#include <boost/date_time/posix_time/posix_time.hpp>
+
 #include <glog/logging.h>
 #include <stdio.h>
 
@@ -11,6 +14,8 @@
 #include "boost/thread.hpp"
 #include "caffe/caffe.hpp"
 #include "caffe/parallel.hpp"
+
+using caffe::Timer;
 
 namespace caffe {
 
@@ -294,6 +299,11 @@ void P2PSync<Dtype>::on_start() {
 //  CHECK(false);
 #endif
 
+//  LOG(INFO)<< "IN ON_START, AND I  AM GPU " << solver_->param().device_id();
+  
+  Timer timer;
+  timer.Start();
+
   // Wait for update from parent
   if (parent_) {
     P2PSync<Dtype> *parent = queue_.pop();
@@ -304,6 +314,8 @@ void P2PSync<Dtype>::on_start() {
   for (int i = children_.size() - 1; i >= 0; i--) {
     Dtype* src = data_;
     Dtype* dst = children_[i]->data_;
+
+  //LOG(INFO) << "SIZE IS " << (size_ * sizeof(Dtype));
 
 #ifdef DEBUG
     cudaPointerAttributes attributes;
@@ -319,6 +331,10 @@ void P2PSync<Dtype>::on_start() {
     children_[i]->queue_.push(this);
   }
 #endif
+
+    timer.Stop();   
+    LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_START";
+    //LOG(INFO)<< "LEAVING ON_START, AND I AND I AM GPU " << solver_->param().device_id();
 }
 
 template<typename Dtype>
@@ -330,11 +346,27 @@ void P2PSync<Dtype>::on_gradients_ready() {
   CHECK(device == solver_->param().device_id());
 #endif
 
+//    LOG(INFO) << "IN ON_GRADIENTS_READY AND I'M GPU " << solver_->param().device_id();
+
+  Timer timer;
+  timer.Start();
+
   // Sum children gradients as they appear in the queue
   for (int i = 0; i < children_.size(); ++i) {
     P2PSync<Dtype> *child = queue_.pop();
     Dtype* src = child->parent_grads_;
     Dtype* dst = diff_;
+
+   //for (int j = 0; j < children_[i]->count(); ++j) {
+   //    LOG(INFO)<< "src: " << children_[i]->gpu_diff()[j]);
+   //}
+   const vector<Blob<Dtype>*>& net =
+      solver_->net()->learnable_params();
+   for (int j = 0; j < net.size(); j++) {
+      LOG(INFO) << "src: " << net[j]->diff();
+   }
+  
+
 
 #ifdef DEBUG
     bool ok = false;
@@ -377,6 +409,10 @@ void P2PSync<Dtype>::on_gradients_ready() {
     caffe_gpu_scal(size_, Dtype(1.0 / Caffe::solver_count()), diff_);
   }
 #endif
+
+   timer.Stop();  
+   LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+
 }
 
 template<typename Dtype>
@@ -417,7 +453,6 @@ void P2PSync<Dtype>::run(const vector<int>& gpus) {
   }
 
   LOG(INFO)<< "Starting Optimization";
-  LOG(INFO)<< "THIS IS A TEST";
 
   for (int i = 1; i < syncs.size(); ++i) {
     syncs[i]->StartInternalThread();

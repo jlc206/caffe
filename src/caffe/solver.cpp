@@ -1,13 +1,16 @@
 #include <cstdio>
 
 #include <string>
-#include <vector>
+#include <vector> 
 
+#include "caffe/caffe.hpp"
 #include "caffe/solver.hpp"
 #include "caffe/util/format.hpp"
 #include "caffe/util/hdf5.hpp"
 #include "caffe/util/io.hpp"
 #include "caffe/util/upgrade_proto.hpp"
+
+using caffe::Timer;
 
 namespace caffe {
 
@@ -199,6 +202,9 @@ void Solver<Dtype>::Step(int iters) {
   vector<Dtype> losses;
   Dtype smoothed_loss = 0;
 
+  Timer total_timer;
+  total_timer.Start();
+
   while (iter_ < stop_iter) {
     // zero-init the params
     net_->ClearParamDiffs();
@@ -212,9 +218,18 @@ void Solver<Dtype>::Step(int iters) {
       }
     }
 
+    Timer gpu_timer;
+    Timer step_timer;
+    double gpu_time = 0.0;
+
+    step_timer.Start();
+    gpu_timer.Start();
     for (int i = 0; i < callbacks_.size(); ++i) {
       callbacks_[i]->on_start();
     }
+    gpu_timer.Stop();
+    gpu_time += gpu_timer.MicroSeconds();
+
     const bool display = param_.display() && iter_ % param_.display() == 0;
     net_->set_debug_info(display && param_.debug_info());
     // accumulate the loss and gradient
@@ -233,9 +248,24 @@ void Solver<Dtype>::Step(int iters) {
       smoothed_loss += (loss - losses[idx]) / average_loss;
       losses[idx] = loss;
     }
+     
+    gpu_timer.Start();
+    for (int i = 0; i < callbacks_.size(); ++i) {
+      callbacks_[i]->on_gradients_ready();
+    }
+    gpu_timer.Stop();
+    gpu_time += gpu_timer.MicroSeconds();
+
+    ApplyUpdate();
+
+    step_timer.Stop();
+
     if (display) {
       LOG_IF(INFO, Caffe::root_solver()) << "Iteration " << iter_
-          << ", loss = " << smoothed_loss;
+          << ", loss = " << smoothed_loss << " Time spent communicating " << gpu_time/1000;
+  
+      LOG(INFO)<< "GPU " << param_.device_id() << " " << step_timer.MilliSeconds() << " MS SPENT ON STEP"; 
+
       const vector<Blob<Dtype>*>& result = net_->output_blobs();
       int score_index = 0;
       for (int j = 0; j < result.size(); ++j) {
@@ -256,10 +286,7 @@ void Solver<Dtype>::Step(int iters) {
         }
       }
     }
-    for (int i = 0; i < callbacks_.size(); ++i) {
-      callbacks_[i]->on_gradients_ready();
-    }
-    ApplyUpdate();
+
 
     // Increment the internal iter_ counter -- its value should always indicate
     // the number of times the weights have been updated.
@@ -278,8 +305,11 @@ void Solver<Dtype>::Step(int iters) {
       requested_early_exit_ = true;
       // Break out of training loop.
       break;
-    }
+    }  
+
   }
+  total_timer.Stop();
+  LOG(INFO) << "GPU " << param_.device_id() << " TOTAL TIME TAKEN: " << total_timer.MilliSeconds();
 }
 
 template <typename Dtype>
