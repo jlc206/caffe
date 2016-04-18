@@ -13,6 +13,7 @@ namespace bp = boost::python;
 #include "boost/algorithm/string.hpp"
 #include "caffe/caffe.hpp"
 #include "caffe/util/signal_handler.h"
+#include <boost/thread/barrier.hpp>
 
 using caffe::Blob;
 using caffe::Caffe;
@@ -206,8 +207,15 @@ int train() {
   }
 
   if (gpus.size() > 1) {
-    caffe::P2PSync<float> sync(solver, NULL, solver->param());
-    sync.run(gpus);
+
+    //TO DO: make this an optional param
+//     caffe::P2PSync<float> sync(solver, NULL, solver->param());
+    boost::barrier bar(gpus.size());
+    
+    //need a big array for gradients _size*ngpus to pass ptr along
+    //Dtype* big_grad = (Dtype*) malloc(??); //Dtype not in this scope
+    caffe::P2CSync<float> sync(solver, NULL, solver->param(), &bar);
+    sync.run(gpus, &bar);
   } else {
     LOG(INFO) << "Starting Optimization";
     solver->Solve();

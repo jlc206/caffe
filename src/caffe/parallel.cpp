@@ -15,6 +15,9 @@
 #include "caffe/caffe.hpp"
 #include "caffe/parallel.hpp"
 
+//for barrier
+#include <boost/thread/barrier.hpp>
+
 using caffe::Timer;
 
 namespace caffe {
@@ -360,11 +363,11 @@ void P2PSync<Dtype>::on_gradients_ready() {
    //for (int j = 0; j < children_[i]->count(); ++j) {
    //    LOG(INFO)<< "src: " << children_[i]->gpu_diff()[j]);
    //}
-   const vector<Blob<Dtype>*>& net =
-      solver_->net()->learnable_params();
-   for (int j = 0; j < net.size(); j++) {
-      LOG(INFO) << "src: " << net[j]->diff();
-   }
+//    const vector<Blob<Dtype>*>& net =
+//       solver_->net()->learnable_params();
+//    for (int j = 0; j < net.size(); j++) {
+//       LOG(INFO) << "src: " << net[j]->diff();
+//    }
   
 
 
@@ -466,8 +469,228 @@ void P2PSync<Dtype>::run(const vector<int>& gpus) {
   }
 }
 
+
+
+
+//-------------------------------------------------------------
+
+
+
+template<typename Dtype>
+P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver,
+                        P2CSync<Dtype>* parent, const SolverParameter& param, boost::barrier* bar)
+    : GPUParams<Dtype>(root_solver, param.device_id()),
+      parent_(parent),
+      children_(),
+      barrier_(bar),
+      big_gradients_(),
+      initial_iter_(root_solver->iter()),
+      solver_() {
+#ifndef CPU_ONLY
+  int initial_device;
+  CUDA_CHECK(cudaGetDevice(&initial_device));
+  const int self = param.device_id();
+  CUDA_CHECK(cudaSetDevice(self));
+
+  if (parent == NULL) {
+    solver_ = root_solver;
+  } else {
+    Caffe::set_root_solver(false);
+    solver_.reset(new WorkerSolver<Dtype>(param, root_solver.get()));
+    Caffe::set_root_solver(true);
+  }
+  this->configure(solver_.get());
+  solver_->add_callback(this);
+
+//   if (parent) {
+//     // Enable p2p access between devices
+//     const int peer = parent->solver_->param().device_id();
+//     int access;
+//     CUDA_CHECK(cudaDeviceCanAccessPeer(&access, self, peer));
+//     if (access) {
+//       CUDA_CHECK(cudaDeviceEnablePeerAccess(peer, 0));
+//     } else {
+//       LOG(INFO)<< "GPU " << self << " does not have p2p access to GPU " << peer;
+//     }
+//     // Allocate receiving buffer on parent
+//     CUDA_CHECK(cudaSetDevice(peer));
+//     CUDA_CHECK(cudaMalloc(&parent_grads_, size_ * sizeof(Dtype)));
+//     CUDA_CHECK(cudaSetDevice(self));
+//   }
+
+  CUDA_CHECK(cudaSetDevice(initial_device));
+#else
+  NO_GPU;
+#endif
+}
+
+template<typename Dtype>
+P2CSync<Dtype>::~P2CSync() {
+#ifndef CPU_ONLY
+  int initial_device;
+  CUDA_CHECK(cudaGetDevice(&initial_device));
+  const int self = solver_->param().device_id();
+  CUDA_CHECK(cudaSetDevice(self));
+
+  if (parent_) {
+    CUDA_CHECK(cudaFree(parent_grads_));
+    const int peer = parent_->solver_->param().device_id();
+    int access;
+    CUDA_CHECK(cudaDeviceCanAccessPeer(&access, self, peer));
+    if (access) {
+      CUDA_CHECK(cudaDeviceDisablePeerAccess(peer));
+    }
+  }
+
+  CUDA_CHECK(cudaSetDevice(initial_device));
+#endif
+}
+
+
+template<typename Dtype> //same exact implementation as P2P
+void P2CSync<Dtype>::InternalThreadEntry() {
+  Caffe::SetDevice(solver_->param().device_id());
+  CHECK(Caffe::root_solver());
+  Caffe::set_root_solver(false);
+  if (solver_->param().random_seed() >= 0) {
+    Caffe::set_random_seed(
+        solver_->param().random_seed() + solver_->param().device_id());
+  }
+  solver_->Step(solver_->param().max_iter() - initial_iter_);
+}
+
+template<typename Dtype>
+void P2CSync<Dtype>::on_start() {
+    //don't know how to fully get rid of this
+    //compiler yells at me when i delete it, "error: cannot allocate an object of abstract type"
+}
+
+template<typename Dtype>
+void P2CSync<Dtype>::on_gradients_ready() {
+#ifndef CPU_ONLY
+#ifdef DEBUG
+  int device;
+  CUDA_CHECK(cudaGetDevice(&device));
+  CHECK(device == solver_->param().device_id());
+#endif
+
+  Timer timer;
+  timer.Start();
+
+  // Sum children gradients as they appear in the queue
+//  for (int i = 0; i < children_.size(); ++i) {
+//    P2CSync<Dtype> *child = queue_.pop();
+//    Dtype* src = child->parent_grads_;
+//    Dtype* dst = diff_;
+
+
+#ifdef DEBUG
+    bool ok = false;
+    for (int j = 0; j < children_.size(); ++j) {
+      if (child == children_[j]) {
+        ok = true;
+      }
+    }
+    CHECK(ok);
+    cudaPointerAttributes attributes;
+    CUDA_CHECK(cudaPointerGetAttributes(&attributes, src));
+    CHECK(attributes.device == device);
+    CUDA_CHECK(cudaPointerGetAttributes(&attributes, dst));
+    CHECK(attributes.device == device);
+#endif
+
+//    caffe_gpu_add(size_, src, dst, dst);
+//  }
+
+  // Send gradients to parent
+  if (parent_) {
+    Dtype* src = diff_;
+    Dtype* dst = parent_grads_;
+
+#ifdef DEBUG
+    cudaPointerAttributes attributes;
+    CUDA_CHECK(cudaPointerGetAttributes(&attributes, src));
+    CHECK(attributes.device == device);
+    CUDA_CHECK(cudaPointerGetAttributes(&attributes, dst));
+    CHECK(attributes.device == parent_->solver_->param().device_id());
+#endif
+
+    CUDA_CHECK(cudaMemcpyAsync(dst, src, size_ * sizeof(Dtype),  //
+        cudaMemcpyDeviceToDevice, cudaStreamDefault));
+    CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+//    parent_->queue_.push(this);
+  } else {
+    // Loss functions divide gradients by the batch size, so to compensate
+    // for split batch, the root solver divides by number of solvers.
+    caffe_gpu_scal(size_, Dtype(1.0 / Caffe::solver_count()), diff_);
+  }
+#endif
+
+   timer.Stop();  
+   LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+
+}
+
+template<typename Dtype>
+void P2CSync<Dtype>::run(const vector<int>& gpus, boost::barrier* bar) {
+
+
+  
+  SolverParameter param(solver_->param());
+  vector<shared_ptr<P2CSync<Dtype> > > syncs(gpus.size()); //syncs is a vector shared ptr??
+  //^ is this initialization?
+  
+  for (int i = 1; i < gpus.size()-1; ++i) { //-1 because parent already init?
+    //if parent
+  }
+
+  // Build the GPU tree by finding the parent for each solver
+//   for (int attempts = 0; attempts < pairs.size(); ++attempts) {
+//     for (int i = 1; i < pairs.size(); ++i) {
+//       if (!syncs[i].get()) {
+//         P2CSync<Dtype>* parent = NULL;
+//         for (int j = 0; j < syncs.size(); ++j) {
+//           P2CSync<Dtype>* sync = j == 0 ? this : syncs[j].get();
+//           if (sync) {
+//             const SolverParameter& p = sync->solver()->param();
+//             if (p.device_id() == pairs[i].parent()) {
+//               parent = sync;
+//             }
+//           }
+//         }
+//         if (parent) {
+//           param.set_device_id(pairs[i].device());
+//           syncs[i].reset(new P2CSync<Dtype>(solver_, parent, param));
+//           parent->children_.push_back((P2CSync<Dtype>*) syncs[i].get());
+//         }
+//       }
+//     }
+//   }
+
+  LOG(INFO)<< "Starting Optimization";
+
+  for (int i = 1; i < syncs.size(); ++i) {
+    syncs[i]->StartInternalThread();
+  }
+
+  // Run root solver on current thread
+  solver_->Solve();
+
+  for (int i = 1; i < syncs.size(); ++i) {
+    syncs[i]->StopInternalThread();
+  }
+}
+
+
+
+
+//-------------------------------------------------------------
+
+
+
 INSTANTIATE_CLASS(Params);
 INSTANTIATE_CLASS(GPUParams);
 INSTANTIATE_CLASS(P2PSync);
+INSTANTIATE_CLASS(P2CSync);
 
 }  // namespace caffe
