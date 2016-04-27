@@ -477,46 +477,36 @@ void P2PSync<Dtype>::run(const vector<int>& gpus) {
 
 
 template<typename Dtype>
-P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver,
-                        P2CSync<Dtype>* parent, const SolverParameter& param, boost::barrier* bar)
+P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver, P2CSync<Dtype>* parent, 
+                const SolverParameter& param, boost::barrier* bar, shared_ptr<Dtype> big_gradients, int n_gpus)
     : GPUParams<Dtype>(root_solver, param.device_id()),
       parent_(parent),
       children_(),
-      barrier_(bar),
-      big_gradients_(),
       initial_iter_(root_solver->iter()),
-      solver_() {
+      solver_(),
+      barrier_(),
+      big_gradients_() {
 #ifndef CPU_ONLY
+
+  //keep this stuff?
   int initial_device;
   CUDA_CHECK(cudaGetDevice(&initial_device));
   const int self = param.device_id();
   CUDA_CHECK(cudaSetDevice(self));
 
   if (parent == NULL) {
+    boost::barrier root_barrier(n_gpus);
     solver_ = root_solver;
+    barrier_ = &root_barrier;
+    //STILL need to make a big array for gradients _size*ngpus to pass ptr along?
   } else {
     Caffe::set_root_solver(false);
     solver_.reset(new WorkerSolver<Dtype>(param, root_solver.get()));
     Caffe::set_root_solver(true);
+    barrier_ = parent_->barrier_;
   }
   this->configure(solver_.get());
   solver_->add_callback(this);
-
-//   if (parent) {
-//     // Enable p2p access between devices
-//     const int peer = parent->solver_->param().device_id();
-//     int access;
-//     CUDA_CHECK(cudaDeviceCanAccessPeer(&access, self, peer));
-//     if (access) {
-//       CUDA_CHECK(cudaDeviceEnablePeerAccess(peer, 0));
-//     } else {
-//       LOG(INFO)<< "GPU " << self << " does not have p2p access to GPU " << peer;
-//     }
-//     // Allocate receiving buffer on parent
-//     CUDA_CHECK(cudaSetDevice(peer));
-//     CUDA_CHECK(cudaMalloc(&parent_grads_, size_ * sizeof(Dtype)));
-//     CUDA_CHECK(cudaSetDevice(self));
-//   }
 
   CUDA_CHECK(cudaSetDevice(initial_device));
 #else
@@ -547,7 +537,7 @@ P2CSync<Dtype>::~P2CSync() {
 }
 
 
-template<typename Dtype> //same exact implementation as P2P
+template<typename Dtype> //same exact implementation as P2P?
 void P2CSync<Dtype>::InternalThreadEntry() {
   Caffe::SetDevice(solver_->param().device_id());
   CHECK(Caffe::root_solver());
@@ -632,40 +622,17 @@ void P2CSync<Dtype>::on_gradients_ready() {
 }
 
 template<typename Dtype>
-void P2CSync<Dtype>::run(const vector<int>& gpus, boost::barrier* bar) {
-
-
+void P2CSync<Dtype>::run(const vector<int>& gpus) { 
   
   SolverParameter param(solver_->param());
   vector<shared_ptr<P2CSync<Dtype> > > syncs(gpus.size()); //syncs is a vector shared ptr??
-  //^ is this initialization?
-  
-  for (int i = 1; i < gpus.size()-1; ++i) { //-1 because parent already init?
-    //if parent
-  }
 
-  // Build the GPU tree by finding the parent for each solver
-//   for (int attempts = 0; attempts < pairs.size(); ++attempts) {
-//     for (int i = 1; i < pairs.size(); ++i) {
-//       if (!syncs[i].get()) {
-//         P2CSync<Dtype>* parent = NULL;
-//         for (int j = 0; j < syncs.size(); ++j) {
-//           P2CSync<Dtype>* sync = j == 0 ? this : syncs[j].get();
-//           if (sync) {
-//             const SolverParameter& p = sync->solver()->param();
-//             if (p.device_id() == pairs[i].parent()) {
-//               parent = sync;
-//             }
-//           }
-//         }
-//         if (parent) {
-//           param.set_device_id(pairs[i].device());
-//           syncs[i].reset(new P2CSync<Dtype>(solver_, parent, param));
-//           parent->children_.push_back((P2CSync<Dtype>*) syncs[i].get());
-//         }
-//       }
-//     }
-//   }
+
+  //INSTEAD.. each remaining class gets ptr to barrier and ptr to memory
+  //not quite sure how to do this
+  for (int i = 1; i < gpus.size()-1; ++i) { //-1 because parent already created
+    syncs[i].reset(new P2CSync<Dtype>(solver_, this, param, barrier_, big_gradients_, gpus.size()));
+  }
 
   LOG(INFO)<< "Starting Optimization";
 

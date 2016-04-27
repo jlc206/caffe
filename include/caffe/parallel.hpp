@@ -120,15 +120,15 @@ template<typename Dtype>
 class P2CSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
     public InternalThread {
  public:
-  explicit P2CSync(shared_ptr<Solver<Dtype> > root_solver,
-                   P2CSync<Dtype>* parent, const SolverParameter& param, boost::barrier* bar);
+  explicit P2CSync(shared_ptr<Solver<Dtype> > root_solver, P2CSync<Dtype>* parent, 
+                const SolverParameter& param, boost::barrier* bar, shared_ptr<Dtype> big_gradients, int n_gpus);
   virtual ~P2CSync();
 
   inline const shared_ptr<Solver<Dtype> >& solver() const {
     return solver_;
   }
 
-  void run(const vector<int>& gpus, boost::barrier* bar);
+  void run(const vector<int>& gpus);
 
  protected:
   void on_start();
@@ -138,12 +138,11 @@ class P2CSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
 
   P2CSync<Dtype>* parent_;
   vector<P2CSync<Dtype>*> children_;
-  boost::barrier* barrier_;
-  shared_ptr<Dtype>* big_gradients_; //??
-//   BlockingQueue<P2PSync<Dtype>*> queue_; //STILL OF TYPE P2P - dont need bc we'll have barrier?
   const int initial_iter_;
   Dtype* parent_grads_;
   shared_ptr<Solver<Dtype> > solver_;
+  boost::barrier* barrier_; //could also make shared ptr
+  shared_ptr<Dtype> big_gradients_; 
 
   using Params<Dtype>::size_;
   using Params<Dtype>::data_;

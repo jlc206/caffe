@@ -210,12 +210,10 @@ int train() {
 
     //TO DO: make this an optional param
 //     caffe::P2PSync<float> sync(solver, NULL, solver->param());
-    boost::barrier bar(gpus.size());
     
-    //need a big array for gradients _size*ngpus to pass ptr along
-    //Dtype* big_grad = (Dtype*) malloc(??); //Dtype not in this scope
-    caffe::P2CSync<float> sync(solver, NULL, solver->param(), &bar);
-    sync.run(gpus, &bar);
+    
+    caffe::P2CSync<float> sync(solver, NULL, solver->param(), NULL, NULL, gpus.size()); //not happy about  the last NULL
+    sync.run(gpus);
   } else {
     LOG(INFO) << "Starting Optimization";
     solver->Solve();
