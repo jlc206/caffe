@@ -520,10 +520,10 @@ P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver, const SolverPara
   CUDA_CHECK(cudaSetDevice(self));
 
   solver_ = root_solver;
-  big_gradients_.reset(new Dtype[(size_ * sizeof(Dtype) * n_gpus)]);
+  big_gradients_.reset(new Dtype[(size_ * n_gpus)]);
   barrier_.reset(new boost::barrier(n_gpus));
   
-  LOG(INFO) << "size of big gradients is " << (size_* sizeof(Dtype)* n_gpus);
+  LOG(INFO) << "size of big gradients is " << sizeof(big_gradients_);
 
   this->configure(solver_.get());
   solver_->add_callback(this);
@@ -544,17 +544,7 @@ P2CSync<Dtype>::~P2CSync() {
   CUDA_CHECK(cudaGetDevice(&initial_device));
   const int self = solver_->param().device_id();
   CUDA_CHECK(cudaSetDevice(self));
-
-  if (parent_) {
-    CUDA_CHECK(cudaFree(device_grads_));
-    const int peer = parent_->solver_->param().device_id();
-    int access;
-    CUDA_CHECK(cudaDeviceCanAccessPeer(&access, self, peer));
-    if (access) {
-      CUDA_CHECK(cudaDeviceDisablePeerAccess(peer));
-    }
-  }
-
+  CUDA_CHECK(cudaFree(device_grads_));
   CUDA_CHECK(cudaSetDevice(initial_device));
 #endif
 }
@@ -585,9 +575,11 @@ void P2CSync<Dtype>::on_gradients_ready() {
   
   //copy to your spot in global mem
   Dtype* src = diff_;
-  Dtype* dst = big_gradients_.get() + (size_ * sizeof(Dtype) * worker_num_);
-  
-  LOG(INFO) << "writing to offset: " << size_ * sizeof(Dtype) * worker_num_;
+  Dtype* dst = big_gradients_.get() + (size_ * worker_num_);
+
+//   LOG(INFO) << "diff_ size is: " << sizeof(diff_);
+//   LOG(INFO) << "big_gradients_ size is: " << sizeof(big_gradients_);
+//   LOG(INFO) << "writing to offset: " << size_ * worker_num_;
   
   CUDA_CHECK(cudaMemcpyAsync(dst, src, size_ * sizeof(Dtype),
         cudaMemcpyDeviceToHost, cudaStreamDefault));
@@ -601,7 +593,7 @@ void P2CSync<Dtype>::on_gradients_ready() {
   caffe_gpu_set(size_, Dtype(0), diff_); // not sure if necessary
   
   //copy whole thing to "device big gradients" - malloc'ed
-  CUDA_CHECK(cudaMemcpyAsync(device_grads_, big_gradients_.get(), sizeof(big_gradients_),
+  CUDA_CHECK(cudaMemcpyAsync(device_grads_, big_gradients_.get(), size_ * sizeof(Dtype) * num_gpus_,
         cudaMemcpyHostToDevice, cudaStreamDefault)); //destination, source, amt to copy..
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   //sum
@@ -612,8 +604,7 @@ void P2CSync<Dtype>::on_gradients_ready() {
 #endif
 
    timer.Stop();  
-//    LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
-   LOG(INFO)<< "GPU " << worker_num_ << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+   LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
 
 }
 
@@ -624,6 +615,7 @@ void P2CSync<Dtype>::run(const vector<int>& gpus) {
   vector<shared_ptr<P2CSync<Dtype> > > syncs(gpus.size());
 
   for (int i = 1; i < gpus.size(); ++i) { //go to -1 because parent already created
+    param.set_device_id(i);
     syncs[i].reset(new P2CSync<Dtype>(solver_, this, param, barrier_, big_gradients_, i));
   }
 

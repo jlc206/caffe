@@ -215,9 +215,9 @@ void caffe_gpu_add<double>(const int N, const double* a, const double* b,
 template <typename Dtype>
 __global__ void add_strided_kernel(const int n, const int n_gpus, const Dtype* a,
     Dtype* y) {
-  CUDA_KERNEL_LOOP(index, 2) {
-    CUDA_KERNEL_LOOP(gpu_index, 15) {
-      y[1] += a[(gpu_index*n)+index];
+  CUDA_KERNEL_LOOP(index, n) {
+    for (int gpu_index = 0; gpu_index < n_gpus; gpu_index++) { //do regular for loop here
+      y[index] += a[(gpu_index*n)+index];
     }
   }
 }

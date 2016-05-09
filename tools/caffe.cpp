@@ -30,6 +30,9 @@ DEFINE_string(gpu, "",
     "Optional; run in GPU mode on given device IDs separated by ','."
     "Use '-gpu all' to run on all available GPUs. The effective training "
     "batch size is multiplied by the number of devices.");
+DEFINE_string(comm, "",
+    "Optional; GPU communication scheme to use."
+    "Use '-comm new' or  '-comm old'.");
 DEFINE_string(solver, "",
     "The solver definition protocol buffer text file.");
 DEFINE_string(model, "",
@@ -208,13 +211,17 @@ int train() {
 
   if (gpus.size() > 1) {
 
-    //TO DO: make this an optional param
-//     caffe::P2PSync<float> sync(solver, NULL, solver->param());
+      if (FLAGS_comm.size() == 0 || FLAGS_comm == "old") {
+        LOG(INFO) << "OLD (TREE) GPU SCHEME";
+        caffe::P2PSync<float> sync(solver, NULL, solver->param());
+        sync.run(gpus);
+      }
+      else {
+        LOG(INFO) << "NEW (LINEAR) GPU SCHEME";
+        caffe::P2CSync<float> sync(solver, solver->param(), gpus.size()); //create parent
+        sync.run(gpus);
+      }
     
-    LOG(INFO) << "MODIFIED GPU SCHEME";
-    caffe::P2CSync<float> sync(solver, solver->param(), gpus.size()); //create parent
-    
-    sync.run(gpus);
   } else {
     LOG(INFO) << "Starting Optimization";
     solver->Solve();
