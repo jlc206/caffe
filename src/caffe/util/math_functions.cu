@@ -207,6 +207,50 @@ void caffe_gpu_add<double>(const int N, const double* a, const double* b,
       N, a, b, y);
 }
 
+
+
+
+
+
+template <typename Dtype>
+__global__ void add_strided_kernel(const int n, const int n_gpus, const Dtype* a,
+    Dtype* y) {
+  CUDA_KERNEL_LOOP(index, 2) {
+    CUDA_KERNEL_LOOP(gpu_index, 15) {
+      y[1] += a[(gpu_index*n)+index];
+    }
+  }
+}
+
+template <>
+void caffe_gpu_add_strided<float>(const int N, const int n_gpus, const float* a,
+    float* y) {
+  // NOLINT_NEXT_LINE(whitespace/operators)
+  add_strided_kernel<float><<<CAFFE_GET_BLOCKS(N), CAFFE_CUDA_NUM_THREADS>>>(
+      N, n_gpus, a, y);
+}
+
+template <>
+void caffe_gpu_add_strided<double>(const int N, const int n_gpus, const double* a,
+    double* y) {
+  // NOLINT_NEXT_LINE(whitespace/operators)
+  add_strided_kernel<double><<<CAFFE_GET_BLOCKS(N), CAFFE_CUDA_NUM_THREADS>>>(
+      N, n_gpus, a, y);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 template <typename Dtype>
 __global__ void sub_kernel(const int n, const Dtype* a,
     const Dtype* b, Dtype* y) {

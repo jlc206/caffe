@@ -360,17 +360,6 @@ void P2PSync<Dtype>::on_gradients_ready() {
     Dtype* src = child->parent_grads_;
     Dtype* dst = diff_;
 
-   //for (int j = 0; j < children_[i]->count(); ++j) {
-   //    LOG(INFO)<< "src: " << children_[i]->gpu_diff()[j]);
-   //}
-//    const vector<Blob<Dtype>*>& net =
-//       solver_->net()->learnable_params();
-//    for (int j = 0; j < net.size(); j++) {
-//       LOG(INFO) << "src: " << net[j]->diff();
-//    }
-  
-
-
 #ifdef DEBUG
     bool ok = false;
     for (int j = 0; j < children_.size(); ++j) {
@@ -475,44 +464,78 @@ void P2PSync<Dtype>::run(const vector<int>& gpus) {
 //-------------------------------------------------------------
 
 
-
+//FOR CHILDREN
 template<typename Dtype>
 P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver, P2CSync<Dtype>* parent, 
-                const SolverParameter& param, boost::barrier* bar, shared_ptr<Dtype> big_gradients, int n_gpus)
+                const SolverParameter& param, shared_ptr<boost::barrier>, shared_ptr<Dtype> big_gradients, int worker)
     : GPUParams<Dtype>(root_solver, param.device_id()),
       parent_(parent),
-      children_(),
       initial_iter_(root_solver->iter()),
+      worker_num_(worker),
+      num_gpus_(parent->num_gpus_),
       solver_(),
       barrier_(),
       big_gradients_() {
 #ifndef CPU_ONLY
 
-  //keep this stuff?
   int initial_device;
   CUDA_CHECK(cudaGetDevice(&initial_device));
   const int self = param.device_id();
   CUDA_CHECK(cudaSetDevice(self));
 
-  if (parent == NULL) {
-    boost::barrier root_barrier(n_gpus);
-    solver_ = root_solver;
-    barrier_ = &root_barrier;
-    //STILL need to make a big array for gradients _size*ngpus to pass ptr along?
-  } else {
-    Caffe::set_root_solver(false);
-    solver_.reset(new WorkerSolver<Dtype>(param, root_solver.get()));
-    Caffe::set_root_solver(true);
-    barrier_ = parent_->barrier_;
-  }
+  Caffe::set_root_solver(false);
+  solver_.reset(new WorkerSolver<Dtype>(param, root_solver.get()));
+  Caffe::set_root_solver(true);
+  
+  barrier_ = parent_->barrier_;
+  big_gradients_ = parent_->big_gradients_;
+  
   this->configure(solver_.get());
   solver_->add_callback(this);
+  
+  CUDA_CHECK(cudaMalloc(&device_grads_, (size_ * sizeof(Dtype) * num_gpus_)));
 
   CUDA_CHECK(cudaSetDevice(initial_device));
 #else
   NO_GPU;
 #endif
 }
+
+//FOR PARENT
+template<typename Dtype>
+P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver, const SolverParameter& param, int n_gpus)
+    : GPUParams<Dtype>(root_solver, param.device_id()),
+      parent_(),
+      initial_iter_(root_solver->iter()),
+      worker_num_(0),
+      num_gpus_(n_gpus),
+      solver_(),
+      barrier_(),
+      big_gradients_() {
+#ifndef CPU_ONLY
+
+  int initial_device;
+  CUDA_CHECK(cudaGetDevice(&initial_device));
+  const int self = param.device_id();
+  CUDA_CHECK(cudaSetDevice(self));
+
+  solver_ = root_solver;
+  big_gradients_.reset(new Dtype[(size_ * sizeof(Dtype) * n_gpus)]);
+  barrier_.reset(new boost::barrier(n_gpus));
+  
+  LOG(INFO) << "size of big gradients is " << (size_* sizeof(Dtype)* n_gpus);
+
+  this->configure(solver_.get());
+  solver_->add_callback(this);
+  
+  CUDA_CHECK(cudaMalloc(&device_grads_, (size_ * sizeof(Dtype) * n_gpus)));
+
+  CUDA_CHECK(cudaSetDevice(initial_device));
+#else
+  NO_GPU;
+#endif
+}
+
 
 template<typename Dtype>
 P2CSync<Dtype>::~P2CSync() {
@@ -523,7 +546,7 @@ P2CSync<Dtype>::~P2CSync() {
   CUDA_CHECK(cudaSetDevice(self));
 
   if (parent_) {
-    CUDA_CHECK(cudaFree(parent_grads_));
+    CUDA_CHECK(cudaFree(device_grads_));
     const int peer = parent_->solver_->param().device_id();
     int access;
     CUDA_CHECK(cudaDeviceCanAccessPeer(&access, self, peer));
@@ -537,7 +560,7 @@ P2CSync<Dtype>::~P2CSync() {
 }
 
 
-template<typename Dtype> //same exact implementation as P2P?
+template<typename Dtype> 
 void P2CSync<Dtype>::InternalThreadEntry() {
   Caffe::SetDevice(solver_->param().device_id());
   CHECK(Caffe::root_solver());
@@ -551,73 +574,46 @@ void P2CSync<Dtype>::InternalThreadEntry() {
 
 template<typename Dtype>
 void P2CSync<Dtype>::on_start() {
-    //don't know how to fully get rid of this
-    //compiler yells at me when i delete it, "error: cannot allocate an object of abstract type"
 }
 
 template<typename Dtype>
 void P2CSync<Dtype>::on_gradients_ready() {
 #ifndef CPU_ONLY
-#ifdef DEBUG
-  int device;
-  CUDA_CHECK(cudaGetDevice(&device));
-  CHECK(device == solver_->param().device_id());
-#endif
 
   Timer timer;
   timer.Start();
+  
+  //copy to your spot in global mem
+  Dtype* src = diff_;
+  Dtype* dst = big_gradients_.get() + (size_ * sizeof(Dtype) * worker_num_);
+  
+  LOG(INFO) << "writing to offset: " << size_ * sizeof(Dtype) * worker_num_;
+  
+  CUDA_CHECK(cudaMemcpyAsync(dst, src, size_ * sizeof(Dtype),
+        cudaMemcpyDeviceToHost, cudaStreamDefault));
+  CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+  
+  //wait until all others are done
+  barrier_->wait();
+  
+  //do calculation
+  
+  caffe_gpu_set(size_, Dtype(0), diff_); // not sure if necessary
+  
+  //copy whole thing to "device big gradients" - malloc'ed
+  CUDA_CHECK(cudaMemcpyAsync(device_grads_, big_gradients_.get(), sizeof(big_gradients_),
+        cudaMemcpyHostToDevice, cudaStreamDefault)); //destination, source, amt to copy..
+  CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+  //sum
+  caffe_gpu_add_strided(size_, num_gpus_, device_grads_, diff_); 
+  //then do this thing
+  caffe_gpu_scal(size_, Dtype(1.0 / Caffe::solver_count()), diff_);
 
-  // Sum children gradients as they appear in the queue
-//  for (int i = 0; i < children_.size(); ++i) {
-//    P2CSync<Dtype> *child = queue_.pop();
-//    Dtype* src = child->parent_grads_;
-//    Dtype* dst = diff_;
-
-
-#ifdef DEBUG
-    bool ok = false;
-    for (int j = 0; j < children_.size(); ++j) {
-      if (child == children_[j]) {
-        ok = true;
-      }
-    }
-    CHECK(ok);
-    cudaPointerAttributes attributes;
-    CUDA_CHECK(cudaPointerGetAttributes(&attributes, src));
-    CHECK(attributes.device == device);
-    CUDA_CHECK(cudaPointerGetAttributes(&attributes, dst));
-    CHECK(attributes.device == device);
-#endif
-
-//    caffe_gpu_add(size_, src, dst, dst);
-//  }
-
-  // Send gradients to parent
-  if (parent_) {
-    Dtype* src = diff_;
-    Dtype* dst = parent_grads_;
-
-#ifdef DEBUG
-    cudaPointerAttributes attributes;
-    CUDA_CHECK(cudaPointerGetAttributes(&attributes, src));
-    CHECK(attributes.device == device);
-    CUDA_CHECK(cudaPointerGetAttributes(&attributes, dst));
-    CHECK(attributes.device == parent_->solver_->param().device_id());
-#endif
-
-    CUDA_CHECK(cudaMemcpyAsync(dst, src, size_ * sizeof(Dtype),  //
-        cudaMemcpyDeviceToDevice, cudaStreamDefault));
-    CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
-//    parent_->queue_.push(this);
-  } else {
-    // Loss functions divide gradients by the batch size, so to compensate
-    // for split batch, the root solver divides by number of solvers.
-    caffe_gpu_scal(size_, Dtype(1.0 / Caffe::solver_count()), diff_);
-  }
 #endif
 
    timer.Stop();  
-   LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+//    LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+   LOG(INFO)<< "GPU " << worker_num_ << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
 
 }
 
@@ -625,13 +621,10 @@ template<typename Dtype>
 void P2CSync<Dtype>::run(const vector<int>& gpus) { 
   
   SolverParameter param(solver_->param());
-  vector<shared_ptr<P2CSync<Dtype> > > syncs(gpus.size()); //syncs is a vector shared ptr??
+  vector<shared_ptr<P2CSync<Dtype> > > syncs(gpus.size());
 
-
-  //INSTEAD.. each remaining class gets ptr to barrier and ptr to memory
-  //not quite sure how to do this
-  for (int i = 1; i < gpus.size()-1; ++i) { //-1 because parent already created
-    syncs[i].reset(new P2CSync<Dtype>(solver_, this, param, barrier_, big_gradients_, gpus.size()));
+  for (int i = 1; i < gpus.size(); ++i) { //go to -1 because parent already created
+    syncs[i].reset(new P2CSync<Dtype>(solver_, this, param, barrier_, big_gradients_, i));
   }
 
   LOG(INFO)<< "Starting Optimization";

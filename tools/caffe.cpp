@@ -211,8 +211,9 @@ int train() {
     //TO DO: make this an optional param
 //     caffe::P2PSync<float> sync(solver, NULL, solver->param());
     
+    LOG(INFO) << "MODIFIED GPU SCHEME";
+    caffe::P2CSync<float> sync(solver, solver->param(), gpus.size()); //create parent
     
-    caffe::P2CSync<float> sync(solver, NULL, solver->param(), NULL, NULL, gpus.size()); //not happy about  the last NULL
     sync.run(gpus);
   } else {
     LOG(INFO) << "Starting Optimization";

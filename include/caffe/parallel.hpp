@@ -121,7 +121,8 @@ class P2CSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
     public InternalThread {
  public:
   explicit P2CSync(shared_ptr<Solver<Dtype> > root_solver, P2CSync<Dtype>* parent, 
-                const SolverParameter& param, boost::barrier* bar, shared_ptr<Dtype> big_gradients, int n_gpus);
+                const SolverParameter& param, shared_ptr<boost::barrier> bar, shared_ptr<Dtype> big_gradients, int worker);
+  explicit P2CSync(shared_ptr<Solver<Dtype> > root_solver, const SolverParameter& param, int n_gpus);
   virtual ~P2CSync();
 
   inline const shared_ptr<Solver<Dtype> >& solver() const {
@@ -137,11 +138,12 @@ class P2CSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
   void InternalThreadEntry(); //same implementation as p2p?
 
   P2CSync<Dtype>* parent_;
-  vector<P2CSync<Dtype>*> children_;
   const int initial_iter_;
-  Dtype* parent_grads_;
+  const int worker_num_; //int of which GPU it is
+  const int num_gpus_;
+  Dtype* device_grads_;
   shared_ptr<Solver<Dtype> > solver_;
-  boost::barrier* barrier_; //could also make shared ptr
+  shared_ptr<boost::barrier> barrier_; //could also make shared ptr
   shared_ptr<Dtype> big_gradients_; 
 
   using Params<Dtype>::size_;
