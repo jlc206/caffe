@@ -302,10 +302,8 @@ void P2PSync<Dtype>::on_start() {
 //  CHECK(false);
 #endif
 
-//  LOG(INFO)<< "IN ON_START, AND I  AM GPU " << solver_->param().device_id();
-  
-  Timer timer;
-  timer.Start();
+//   Timer timer;
+//   timer.Start();
 
   // Wait for update from parent
   if (parent_) {
@@ -317,8 +315,6 @@ void P2PSync<Dtype>::on_start() {
   for (int i = children_.size() - 1; i >= 0; i--) {
     Dtype* src = data_;
     Dtype* dst = children_[i]->data_;
-
-  //LOG(INFO) << "SIZE IS " << (size_ * sizeof(Dtype));
 
 #ifdef DEBUG
     cudaPointerAttributes attributes;
@@ -335,9 +331,8 @@ void P2PSync<Dtype>::on_start() {
   }
 #endif
 
-    timer.Stop();   
-    LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_START";
-    //LOG(INFO)<< "LEAVING ON_START, AND I AND I AM GPU " << solver_->param().device_id();
+//     timer.Stop();   
+//     LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_START";
 }
 
 template<typename Dtype>
@@ -351,8 +346,8 @@ void P2PSync<Dtype>::on_gradients_ready() {
 
 //    LOG(INFO) << "IN ON_GRADIENTS_READY AND I'M GPU " << solver_->param().device_id();
 
-  Timer timer;
-  timer.Start();
+//   Timer timer;
+//   timer.Start();
 
   // Sum children gradients as they appear in the queue
   for (int i = 0; i < children_.size(); ++i) {
@@ -399,11 +394,22 @@ void P2PSync<Dtype>::on_gradients_ready() {
     // Loss functions divide gradients by the batch size, so to compensate
     // for split batch, the root solver divides by number of solvers.
     caffe_gpu_scal(size_, Dtype(1.0 / Caffe::solver_count()), diff_);
+    
+
+//       Dtype val;
+//       std::cout<<"diff: ";
+//       for (int i = 0; i < 5; i++) {
+//         cudaMemcpy(&val, &diff_[i], sizeof(Dtype), cudaMemcpyDeviceToHost);
+//         std::cout << val << " ";
+//    
+//       }
+//       std::cout << "\n";
+
   }
 #endif
 
-   timer.Stop();  
-   LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+//    timer.Stop();  
+//    LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
 
 }
 
@@ -522,8 +528,6 @@ P2CSync<Dtype>::P2CSync(shared_ptr<Solver<Dtype> > root_solver, const SolverPara
   solver_ = root_solver;
   big_gradients_.reset(new Dtype[(size_ * n_gpus)]);
   barrier_.reset(new boost::barrier(n_gpus));
-  
-  LOG(INFO) << "size of big gradients is " << sizeof(big_gradients_);
 
   this->configure(solver_.get());
   solver_->add_callback(this);
@@ -570,8 +574,8 @@ template<typename Dtype>
 void P2CSync<Dtype>::on_gradients_ready() {
 #ifndef CPU_ONLY
 
-  Timer timer;
-  timer.Start();
+//   Timer timer;
+//   timer.Start();
   
   //copy to your spot in global mem
   Dtype* src = diff_;
@@ -600,11 +604,23 @@ void P2CSync<Dtype>::on_gradients_ready() {
   caffe_gpu_add_strided(size_, num_gpus_, device_grads_, diff_); 
   //then do this thing
   caffe_gpu_scal(size_, Dtype(1.0 / Caffe::solver_count()), diff_);
+  
+
+//   if (solver_->param().device_id() == 0) {
+//       Dtype val;
+//       std::cout<<"diff: ";
+//       for (int i = 0; i < 5; i++) {
+//         cudaMemcpy(&val, &diff_[i], sizeof(Dtype), cudaMemcpyDeviceToHost);
+//         std::cout << val << " ";
+//    
+//       }
+//       std::cout << "\n";
+//   }
 
 #endif
 
-   timer.Stop();  
-   LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
+//    timer.Stop();  
+//    LOG(INFO)<< "GPU " << solver_->param().device_id() << " " << timer.MilliSeconds() << " MS SPENT IN ON_GRADIENTS_READY";
 
 }
 

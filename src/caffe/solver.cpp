@@ -218,18 +218,19 @@ void Solver<Dtype>::Step(int iters) {
       }
     }
 
-    Timer gpu_timer;
+    Timer start_timer;
+    Timer grad_timer;
     Timer step_timer;
-    double gpu_time = 0.0;
+    Timer fwbw_timer;
 
     step_timer.Start();
-    gpu_timer.Start();
+    start_timer.Start();
     for (int i = 0; i < callbacks_.size(); ++i) {
       callbacks_[i]->on_start();
     }
-    gpu_timer.Stop();
-    gpu_time += gpu_timer.MicroSeconds();
-
+    start_timer.Stop();
+    fwbw_timer.Start();
+    
     const bool display = param_.display() && iter_ % param_.display() == 0;
     net_->set_debug_info(display && param_.debug_info());
     // accumulate the loss and gradient
@@ -248,13 +249,13 @@ void Solver<Dtype>::Step(int iters) {
       smoothed_loss += (loss - losses[idx]) / average_loss;
       losses[idx] = loss;
     }
-     
-    gpu_timer.Start();
+    
+    fwbw_timer.Stop();
+    grad_timer.Start();
     for (int i = 0; i < callbacks_.size(); ++i) {
       callbacks_[i]->on_gradients_ready();
     }
-    gpu_timer.Stop();
-    gpu_time += gpu_timer.MicroSeconds();
+    grad_timer.Stop();
 
     ApplyUpdate();
 
@@ -262,8 +263,11 @@ void Solver<Dtype>::Step(int iters) {
 
     if (display) {
       LOG_IF(INFO, Caffe::root_solver()) << "Iteration " << iter_
-          << ", loss = " << smoothed_loss << " Time spent communicating " << gpu_time/1000;
-  
+          << ", loss = " << smoothed_loss;
+      
+      LOG(INFO)<< "GPU " << param_.device_id() << " " << start_timer.MilliSeconds() << " MS SPENT ON START"; 
+      LOG(INFO)<< "GPU " << param_.device_id() << " " << grad_timer.MilliSeconds() << " MS SPENT ON GRADIENTS"; 
+      LOG(INFO)<< "GPU " << param_.device_id() << " " << fwbw_timer.MilliSeconds() << " MS SPENT ON FWBW"; 
       LOG(INFO)<< "GPU " << param_.device_id() << " " << step_timer.MilliSeconds() << " MS SPENT ON STEP"; 
 
       const vector<Blob<Dtype>*>& result = net_->output_blobs();
